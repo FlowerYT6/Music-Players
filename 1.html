@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Audio Player + Equalizer + Metadata Editor</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.5/jsmediatags.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/browser-id3-writer@4.2.0/dist/browser-id3-writer.min.js"></script>
+  <style>
+    body { background: #111; color: #eee; font-family: Arial, sans-serif; padding: 20px; max-width: 350px; margin: auto; }
+    input[type=text], button { width: 100%; padding: 8px; margin: 6px 0; border-radius: 4px; border: none; }
+    button { background: #2a9df4; color: white; cursor: pointer; }
+    button:hover { background: #2383d1; }
+    .player, .eq, .metadata { background: #222; padding: 15px; margin-top: 15px; border-radius: 10px; }
+    label { display: block; margin-top: 10px; }
+    img { width: 100%; border-radius: 10px; margin-top: 10px; }
+    .explicit { color: red; font-weight: bold; font-size: 1.3em; margin-top: 10px; }
+    .eq-slider { width: 100%; }
+  </style>
+</head>
+<body>
+
+<h2>Audio Player + Equalizer + Metadata Editor</h2>
+
+<div class="player">
+  <input type="file" accept="*/*" id="fileInput" />
+  <audio id="audio" controls style="width: 100%; margin-top: 10px;"></audio>
+  <div id="coverContainer"><img id="cover" src="" alt="Cover Art" /></div>
+  <div class="explicit" id="explicit"></div>
+</div>
+
+<div class="metadata">
+  <h3>Edit Metadata</h3>
+  <label>Title: <input type="text" id="metaTitle" /></label>
+  <label>Artist: <input type="text" id="metaArtist" /></label>
+  <label>Album: <input type="text" id="metaAlbum" /></label>
+  <label>
+    Explicit: 
+    <select id="metaExplicit">
+      <option value="0">No</option>
+      <option value="2">Yes (🅴)</option>
+    </select>
+  </label>
+  <button id="saveMetaBtn" disabled>Save Edited Metadata & Download</button>
+</div>
+
+<div class="eq">
+  <h3>Equalizer + Bass Booster</h3>
+  <label>Bass Boost (<span id="bassVal">0</span> dB)
+    <input type="range" min="0" max="12" value="0" step="0.1" class="eq-slider" id="bassBoost" />
+  </label>
+  <label>60 Hz
+    <input type="range" min="-12" max="12" value="0" step="0.1" class="eq-slider" data-freq="60" />
+  </label>
+  <label>170 Hz
+    <input type="range" min="-12" max="12" value="0" step="0.1" class="eq-slider" data-freq="170" />
+  </label>
+  <label>310 Hz
+    <input type="range" min="-12" max="12" value="0" step="0.1" class="eq-slider" data-freq="310" />
+  </label>
+  <label>600 Hz
+    <input type="range" min="-12" max="12" value="0" step="0.1" class="eq-slider" data-freq="600" />
+  </label>
+  <label>1 kHz
+    <input type="range" min="-12" max="12" value="0" step="0.1" class="eq-slider" data-freq="1000" />
+  </label>
+</div>
+
+<script>
+  const fileInput = document.getElementById('fileInput');
+  const audio = document.getElementById('audio');
+  const cover = document.getElementById('cover');
+  const explicit = document.getElementById('explicit');
+  const metaTitle = document.getElementById('metaTitle');
+  const metaArtist = document.getElementById('metaArtist');
+  const metaAlbum = document.getElementById('metaAlbum');
+  const metaExplicit = document.getElementById('metaExplicit');
+  const saveMetaBtn = document.getElementById('saveMetaBtn');
+  const bassBoostSlider = document.getElementById('bassBoost');
+  const bassVal = document.getElementById('bassVal');
+
+  let audioContext, sourceNode, eqFilters = [], bassFilter;
+  let currentFile, arrayBufferData;
+
+  // Setup Web Audio API context and filters
+  function setupAudioContext() {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    sourceNode = audioContext.createMediaElementSource(audio);
+
+    // Bass boost is a low shelf filter at ~100Hz
+    bassFilter = audioContext.createBiquadFilter();
+    bassFilter.type = 'lowshelf';
+    bassFilter.frequency.value = 100;
+    bassFilter.gain.value = 0;
+
+    // 5-band peaking EQ filters at these center frequencies
+    const freqs = [60, 170, 310, 600, 1000];
+    eqFilters = freqs.map(freq => {
+      const filter = audioContext.createBiquadFilter();
+      filter.type = 'peaking';
+      filter.frequency.value = freq;
+      filter.Q.value = 1;
+      filter.gain.value = 0;
+      return filter;
+    });
+
+    // Connect the nodes: source -> bassFilter -> eqFilters in series -> destination
+    sourceNode.connect(bassFilter);
+    let prev = bassFilter;
+    eqFilters.forEach(filter => {
+      prev.connect(filter);
+      prev = filter;
+    });
+    prev.connect(audioContext.destination);
+  }
+
+  // Update EQ gains from sliders
+  function updateEQ() {
+    bassFilter.gain.value = parseFloat(bassBoostSlider.value);
+    bassVal.textContent = bassBoostSlider.value;
+
+    document.querySelectorAll('.eq-slider[data-freq]').forEach(slider => {
+      const freq = slider.dataset.freq;
+      const filter = eqFilters.find(f => f.frequency.value == freq);
+      if (filter) filter.gain.value = parseFloat(slider.value);
+    });
+  }
+
+  // Read metadata from file
+  function readMetadata(file) {
+    return new Promise((resolve, reject) => {
+      jsmediatags.read(file, {
+        onSuccess: tag => resolve(tag.tags),
+        onError: err => reject(err),
+      });
+    });
+  }
+
+  // Update UI from metadata
+  function updateMetadataUI(tags) {
+    metaTitle.value = tags.title || '';
+    metaArtist.value = tags.artist || '';
+    metaAlbum.value = tags.album || '';
+
+    // Explicit detection
+    const isExplicitTitle = tags.title && tags.title.includes('🅴');
+    const advisory = tags['iTunes Advisory'] || tags['advisory'] || null;
+    if (isExplicitTitle || advisory == 2) {
+      explicit.textContent = '🅴 Explicit';
+      metaExplicit.value = "2";
+    } else {
+      explicit.textContent = '';
+      metaExplicit.value = "0";
+    }
+
+    if (tags.picture) {
+      const { data, format } = tags.picture;
+      let base64 = '';
+      data.forEach(byte => { base64 += String.fromCharCode(byte); });
+      cover.src = `data:${format};base64,${btoa(base64)}`;
+    } else {
+      cover.src = '';
+    }
+  }
+
+  // Save metadata and download new file
+  function saveMetadata() {
+    if (!currentFile || !arrayBufferData) return;
+
+    const writer = new ID3Writer(arrayBufferData);
+    writer.setFrame('TIT2', metaTitle.value)
+          .setFrame('TPE1', [metaArtist.value])
+          .setFrame('TALB', metaAlbum.value);
+
+    // Set explicit advisory frame: 'TXXX' frame with description "iTunPGAP" used by iTunes for parental advisory
+    if (metaExplicit.value === "2") {
+      writer.setFrame('TXXX', {
+        description: 'iTunPGAP',
+        value: '1' // '1' means explicit content in iTunes spec
+      });
+      // Also add the "E" to title if not present
+      if (!metaTitle.value.includes('🅴')) {
+        writer.setFrame('TIT2', metaTitle.value + ' 🅴');
+      }
+    } else {
+      // Remove advisory (setting empty)
+      writer.setFrame('TXXX', {
+        description: 'iTunPGAP',
+        value: ''
+      });
+    }
+
+    writer.addTag();
+
+    const blob = writer.getBlob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'edited_' + currentFile.name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 100);
+  }
+
+  fileInput.addEventListener('change', async function () {
+    currentFile = this.files[0];
+    if (!currentFile) return;
+
+    // Read file as ArrayBuffer for ID3Writer
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      arrayBufferData = e.target.result;
+    };
+    reader.readAsArrayBuffer(currentFile);
+
+    audio.src = URL.createObjectURL(currentFile);
+    if (!audioContext) setupAudioContext();
+
+    try {
+      const tags = await readMetadata(currentFile);
+      updateMetadataUI(tags);
+      saveMetaBtn.disabled = false;
+    } catch(e) {
+      console.error('Failed to read metadata:', e);
+      metaTitle.value = '';
+      metaArtist.value = '';
+      metaAlbum.value = '';
+      explicit.textContent = '';
+      cover.src = '';
+      saveMetaBtn.disabled = false;
+    }
+  });
+
+  saveMetaBtn.addEventListener('click', () => {
+    saveMetadata();
+  });
+
+  bassBoostSlider.addEventListener('input', updateEQ);
+  document.querySelectorAll('.eq-slider[data-freq]').forEach(slider => {
+    slider.addEventListener('input', updateEQ);
+  });
+
+</script>
+
+</body>
+</html>
